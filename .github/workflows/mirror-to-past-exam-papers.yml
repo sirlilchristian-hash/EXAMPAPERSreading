@@ -1,0 +1,14 @@
+  - name: Set Git user
+    run: |
+      git config --global user.name "github-actions[bot]"
+      git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+  - name: Add target remote
+    env:
+      TARGET_REPO: sirlilchristian-hash/Past-Exam-papers
+    run: |
+      git remote add target https://x-access-token:${{ secrets.PERSONAL_TOKEN }}@github.com/${TARGET_REPO}.git
+
+  - name: Push mirror to target
+    run: |
+      git push --mirror target
