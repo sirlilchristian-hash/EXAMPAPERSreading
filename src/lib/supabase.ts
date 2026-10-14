@@ -44,15 +44,19 @@ export async function fetchPapersFromSupabase(): Promise<{
       return { papers: null, error: result.error.message };
     }
 
-    const loadedPapers: Paper[] = (result.data || []).map((row: any) => ({
-      id: String(row.id),
-      created_at: row.created_at,
-      unit_code: row.unit_code || '',
-      paper_title: row.paper_title || '',
-      price: row.price ?? 'KSh 50',
-      file_path: row.file_path || null,
-      status: typeof row.status === 'string' ? row.status : 'available',
-    }));
+    const loadedPapers: Paper[] = (result.data || []).map((row: any) => {
+      const isFree = row.price === 0 || row.price === '0' || row.price === 'KSh 0';
+      return {
+        id: String(row.id),
+        created_at: row.created_at,
+        unit_code: row.unit_code || '',
+        paper_title: row.paper_title || '',
+        price: isFree ? 'KSh 0' : (typeof row.price === 'number' ? `KSh ${row.price}` : (row.price ?? 'KSh 50')),
+        file_path: row.file_path || null,
+        status: typeof row.status === 'string' ? row.status : 'available',
+        is_free: isFree,
+      };
+    });
 
     return { papers: loadedPapers, error: null };
   } catch (err: any) {

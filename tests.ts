@@ -5,7 +5,9 @@ import {
   generateCheckoutToken, 
   verifyCheckoutToken, 
   isCheckoutSessionAuthorized,
-  simulatedIdempotencyRegistry 
+  simulatedIdempotencyRegistry,
+  getAuthoritativePdfPageCount,
+  computeAuthoritativeLifoPages
 } from './server.ts';
 
 test('1. Checkout Token Expiration and Secure Validation', () => {
@@ -111,6 +113,51 @@ test('5. Deterministic Last-N-Pages Selection Logic', () => {
   // Invalid quantities
   assert.deepStrictEqual(computeLastN(300, 0), []);
   assert.deepStrictEqual(computeLastN(300, 301), []);
+});
+
+test('6. Authoritative Server-Side PDF Page Count Extraction', async () => {
+  // Test missing or invalid path
+  const resInvalid = await getAuthoritativePdfPageCount('nonexistent/path/file.pdf');
+  assert.strictEqual(resInvalid.pageCount, null);
+  assert.ok(resInvalid.error);
+
+  // Test real Microeconomics PDF stored at papers/34FT4/1789736954276-cpv4k7c-merged.pdf
+  const resMicro = await getAuthoritativePdfPageCount('papers/34FT4/1789736954276-cpv4k7c-merged.pdf');
+  assert.strictEqual(resMicro.pageCount, 303, 'Microeconomics PDF should authoritatively return 303 pages');
+  assert.strictEqual(resMicro.error, undefined);
+});
+
+test('7. Synchronized API Page Counts & Microeconomics = 303 Pages', async () => {
+  const resMicro = await getAuthoritativePdfPageCount('papers/34FT4/1789736954276-cpv4k7c-merged.pdf');
+  assert.strictEqual(resMicro.pageCount, 303, 'Microeconomics paper must report 303 pages');
+});
+
+test('8. Server-Authoritative LIFO Selection Engine (303 Pages)', () => {
+  // 1. 303 pages, 12 pages -> [292..303]
+  const p12 = computeAuthoritativeLifoPages(303, 12);
+  assert.strictEqual(p12.length, 12);
+  assert.strictEqual(p12[0], 292);
+  assert.strictEqual(p12[p12.length - 1], 303);
+
+  // 2. 303 pages, 3 pages -> [301..303]
+  const p3 = computeAuthoritativeLifoPages(303, 3);
+  assert.deepStrictEqual(p3, [301, 302, 303]);
+
+  // 3. One-page purchase -> [303]
+  const p1 = computeAuthoritativeLifoPages(303, 1);
+  assert.deepStrictEqual(p1, [303]);
+
+  // 4. Purchasing all 303 pages -> [1..303]
+  const p303 = computeAuthoritativeLifoPages(303, 303);
+  assert.strictEqual(p303.length, 303);
+  assert.strictEqual(p303[0], 1);
+  assert.strictEqual(p303[302], 303);
+
+  // 5. Zero, negative, non-integer, excessive quantities rejected
+  assert.deepStrictEqual(computeAuthoritativeLifoPages(303, 0), []);
+  assert.deepStrictEqual(computeAuthoritativeLifoPages(303, -5), []);
+  assert.deepStrictEqual(computeAuthoritativeLifoPages(303, 2.5), []);
+  assert.deepStrictEqual(computeAuthoritativeLifoPages(303, 304), []);
 });
 
 console.log('All automated tests executed successfully.');

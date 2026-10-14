@@ -56,6 +56,7 @@ interface PaperItem {
   page_price_ranges?: PagePriceRange[];
   custom_page_prices?: Record<string | number, number>;
   min_page_limit?: number;
+  is_free?: boolean;
 }
 
 const PdfDocLockBadge: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ size = 'md' }) => {
@@ -246,13 +247,24 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
     ? calculateAuthoritativePagesPrice(selectedPaper, lastNPages)
     : { totalAmount: 0, breakdown: '', pricingModel: 'fixed' as const, unitPriceSummary: '', itemizedDetails: [], isValid: false };
 
-  const fullPaperNumericPrice = selectedPaper
-    ? (typeof selectedPaper.price === 'number'
-        ? selectedPaper.price
-        : parseInt(String(selectedPaper.price).replace(/[^\d]/g, '') || '50', 10))
-    : 50;
+  const isSelectedPaperFree = Boolean(
+    selectedPaper &&
+    (selectedPaper.is_free ||
+     selectedPaper.price === 0 ||
+     selectedPaper.price === '0' ||
+     selectedPaper.price === 'KSh 0' ||
+     (typeof selectedPaper.price === 'string' && selectedPaper.price.toLowerCase().includes('free')))
+  );
 
-  const finalAmount = purchaseType === 'pages' ? pagesPricing.totalAmount : fullPaperNumericPrice;
+  const fullPaperNumericPrice = isSelectedPaperFree
+    ? 0
+    : (selectedPaper
+        ? (typeof selectedPaper.price === 'number'
+            ? selectedPaper.price
+            : parseInt(String(selectedPaper.price).replace(/[^\d]/g, '') || '50', 10))
+        : 50);
+
+  const finalAmount = isSelectedPaperFree ? 0 : (purchaseType === 'pages' ? pagesPricing.totalAmount : fullPaperNumericPrice);
 
   useEffect(() => {
     if (initialUnitQuery) {
@@ -479,9 +491,27 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
     setStep(3);
   };
 
-  const handleFreePurchase = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleFreePurchase = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (submittingRef.current) return;
+
+    const errors: Record<string, string> = {};
+    if (!firstName.trim()) errors.firstName = 'First name is required';
+    if (!secondName.trim()) errors.secondName = 'Second name is required';
+    if (!email.trim()) {
+      errors.email = 'Email address is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      errors.email = 'Enter a valid email address (e.g. student@example.com)';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setPaymentErrors(errors);
+      return;
+    }
+
+    if (!selectedPaper) return;
+
+    setPaymentErrors({});
     submittingRef.current = true;
     setIsInitiatingPayment(true);
     try {
@@ -489,11 +519,11 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          paperId: selectedPaper?.id,
-          first_name: firstName,
-          second_name: secondName,
-          email: email,
-          phone: phone,
+          paperId: selectedPaper.id,
+          first_name: firstName.trim(),
+          second_name: secondName.trim(),
+          email: email.trim(),
+          phone: phone.trim() || '0000000000',
         }),
       });
       const data = await res.json();
@@ -502,10 +532,10 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
         setAccessToken(data.accessToken);
         setStep(5);
       } else {
-        setPaymentErrors({ general: data.error || 'Failed to complete free purchase.' });
+        setPaymentErrors({ general: data.error || 'Failed to complete free access request.' });
       }
     } catch (err) {
-      setPaymentErrors({ general: 'Network error.' });
+      setPaymentErrors({ general: 'Network error. Please try again.' });
     } finally {
       setIsInitiatingPayment(false);
       submittingRef.current = false;
@@ -515,6 +545,9 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
   // Handle Initiate Real M-Pesa STK Push (Step 3 -> Step 4)
   const handlePaySubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (finalAmount === 0 || isSelectedPaperFree) {
+      return handleFreePurchase(e);
+    }
     
     // Guard: Return immediately if submission is already in progress
     if (submittingRef.current) return;
@@ -1021,7 +1054,9 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
                             <div className="text-right shrink-0">
                               <span className="text-base font-black text-emerald-800 block">
-                                {finalAmount === 0 ? "FREE" : paper.price}
+                                {(paper.is_free || paper.price === 0 || paper.price === '0' || paper.price === 'KSh 0' || (typeof paper.price === 'string' && paper.price.toLowerCase().includes('free')))
+                                  ? "FREE"
+                                  : (typeof paper.price === 'number' ? `KSh ${paper.price}` : paper.price)}
                               </span>
                               <span className={`text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full inline-block mt-0.5 border ${paper.status === 'available' as any ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-rose-100 text-rose-800 border-rose-200'}`}>
                                 {paper.status === 'available' as any ? 'Available' : 'Unavailable'}
@@ -1095,7 +1130,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
                   <div className="text-right shrink-0">
                     <span className="text-base sm:text-lg font-black text-emerald-800 block">
-                      {finalAmount === 0 ? "FREE" : selectedPaper.price}
+                      {isSelectedPaperFree ? "FREE / KSh 0" : (typeof selectedPaper.price === 'number' ? `KSh ${selectedPaper.price}` : selectedPaper.price)}
                     </span>
                     <div className="mt-1">
                       <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full inline-block border ${selectedPaper.status === 'available' ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-rose-100 text-rose-800 border-rose-200'}`}>
@@ -1154,14 +1189,16 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
                         <div className="flex-1 space-y-1">
                           <div className="flex items-center justify-between flex-wrap gap-2">
                             <span className="font-black text-slate-900 text-sm">
-                              Option A — Buy Whole Document
+                              {isSelectedPaperFree ? "Option A — Free Document Access" : "Option A — Buy Whole Document"}
                             </span>
                             <span className="font-black text-emerald-800 text-sm bg-white px-2.5 py-0.5 rounded-full border border-emerald-300 shadow-2xs">
-                              {finalAmount === 0 ? "FREE" : selectedPaper.price}
+                              {isSelectedPaperFree ? "FREE / KSh 0" : (typeof selectedPaper.price === 'number' ? `KSh ${selectedPaper.price}` : selectedPaper.price)}
                             </span>
                           </div>
                           <p className="text-xs text-slate-600 leading-relaxed">
-                            Provides immediate, unrestricted access to the complete examination paper including all sections, questions, and official structure upon verified payment.
+                            {isSelectedPaperFree
+                              ? "Provides immediate, 100% free access to the complete examination paper including all sections, questions, and official structure."
+                              : "Provides immediate, unrestricted access to the complete examination paper including all sections, questions, and official structure upon verified payment."}
                           </p>
                         </div>
                       </div>
@@ -1322,7 +1359,21 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
             {/* AUTOMATED M-PESA PAYMENT FORM or FREE ACCESS */}
             {Number(finalAmount) >= 0 ? (
               <form onSubmit={finalAmount === 0 ? handleFreePurchase : handlePaySubmit} className="space-y-5">
-                {finalAmount > 0 && (
+                {finalAmount === 0 ? (
+                  <div className="p-4 rounded-2xl bg-emerald-50/90 border border-emerald-300 flex items-center gap-3 text-left">
+                    <div className="w-10 h-10 rounded-xl bg-[#00D26A] text-slate-950 flex items-center justify-center font-black text-lg shrink-0">
+                      ✓
+                    </div>
+                    <div className="text-xs">
+                      <h3 className="font-extrabold text-slate-900 text-sm">
+                        Free Examination Document
+                      </h3>
+                      <p className="text-slate-600">
+                        This paper is authorized as free access (KSh 0). No M-Pesa transaction will be initiated. Enter your name and email to receive your secure access link immediately.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
                   <div className="p-4 rounded-2xl bg-emerald-50/80 border border-emerald-200 flex items-center gap-3 text-left">
                     <div className="w-10 h-10 rounded-xl bg-[#00D26A] text-slate-950 flex items-center justify-center font-black text-lg shrink-0">
                       M
@@ -1409,7 +1460,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
                   <div>
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wide mb-1">
-                      M-Pesa Phone Number <span className="text-rose-600">*</span>
+                      {finalAmount === 0 ? "Phone Number (Optional)" : <span>M-Pesa Phone Number <span className="text-rose-600">*</span></span>}
                     </label>
                     <input
                       type="tel"
@@ -1424,7 +1475,9 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
                     {paymentErrors.phone ? (
                       <p className="text-[11px] text-rose-600 font-semibold mt-1">{paymentErrors.phone}</p>
                     ) : (
-                      <p className="text-[11px] text-slate-400 mt-1">Enter the Safaricom phone number to receive the M-Pesa PIN prompt.</p>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        {finalAmount === 0 ? "Optional contact number for your delivery record." : "Enter the Safaricom phone number to receive the M-Pesa PIN prompt."}
+                      </p>
                     )}
                   </div>
                 </div>
@@ -1437,7 +1490,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
                   {isInitiatingPayment ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Sending M-Pesa Prompt...</span>
+                      <span>{finalAmount === 0 ? "Activating Free Document..." : "Sending M-Pesa Prompt..."}</span>
                     </>
                   ) : (
                     <span>{finalAmount === 0 ? "Get Free Paper" : `PAY KSh ${finalAmount} WITH M-PESA`}</span>
@@ -1447,7 +1500,11 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
                 <div className="text-center pt-1 pb-2">
                   <p className="text-[11px] text-slate-400 flex items-center justify-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Secure Safaricom Daraja STK Push &bull; Official Godrery Publishers</span>
+                    <span>
+                      {finalAmount === 0
+                        ? "Instant Free Delivery • Official Godrery Publishers"
+                        : "Secure Safaricom Daraja STK Push • Official Godrery Publishers"}
+                    </span>
                   </p>
                 </div>
               </form>
@@ -1536,10 +1593,12 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
             <div className="space-y-1">
               <h2 className="text-2xl font-black text-slate-900">
-                Payment Confirmed!
+                {finalAmount === 0 ? "Document Access Granted!" : "Payment Confirmed!"}
               </h2>
               <p className="text-xs sm:text-sm text-slate-600">
-                Your payment has been verified successfully.
+                {finalAmount === 0
+                  ? "Your free examination paper is ready for viewing and download."
+                  : "Your payment has been verified successfully."}
               </p>
             </div>
 
@@ -1564,7 +1623,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
               <div className="text-right">
                 <span className="font-extrabold text-slate-900 text-sm block">
-                  {finalAmount === 0 ? "FREE" : selectedPaper.price}
+                  {finalAmount === 0 ? "FREE / KSh 0" : (typeof selectedPaper.price === 'number' ? `KSh ${selectedPaper.price}` : selectedPaper.price)}
                 </span>
                 {mpesaReceipt && (
                   <span className="text-[10px] font-mono text-emerald-800 bg-emerald-100/90 border border-emerald-200 px-1.5 py-0.5 rounded mt-0.5 inline-block">
@@ -1591,11 +1650,11 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
               onClick={() => {
                 if (accessToken) {
                   window.location.href = `/document/access/${accessToken}`;
-                } else {
-                  alert("Access token missing. Please refresh.");
+                } else if (currentOrderId) {
+                  window.location.href = `/document/access/${currentOrderId}`;
                 }
               }}
-              className="w-full py-3.5 bg-[#00D26A] hover:bg-[#00b85c] text-white font-extrabold rounded-xl transition-all shadow-md shadow-[#00D26A]/20 flex items-center justify-center gap-2 text-sm sm:text-base active:scale-[0.98]"
+              className="w-full py-3.5 bg-[#00D26A] hover:bg-[#00b85c] text-white font-extrabold rounded-xl transition-all shadow-md shadow-[#00D26A]/20 flex items-center justify-center gap-2 text-sm sm:text-base active:scale-[0.98] cursor-pointer"
             >
               <FolderOpen className="w-5 h-5" />
               <span>Open Document</span>

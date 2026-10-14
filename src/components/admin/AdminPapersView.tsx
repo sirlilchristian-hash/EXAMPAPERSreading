@@ -55,7 +55,7 @@ export const AdminPapersView: React.FC<AdminPapersViewProps> = ({
       `"${p.id || ''}"`,
       `"${(p.unit_code || (p as any).unitCode || '').replace(/"/g, '""')}"`,
       `"${(p.paper_title || (p as any).unitName || '').replace(/"/g, '""')}"`,
-      `"${(typeof p.price === 'number' ? `KSh ${p.price}` : p.price || 'KSh 50').replace(/"/g, '""')}"`,
+      `"${((p.is_free || p.price === 0 || p.price === '0' || p.price === 'KSh 0') ? 'KSh 0' : (typeof p.price === 'number' ? `KSh ${p.price}` : p.price || 'KSh 50')).replace(/"/g, '""')}"`,
       `"${(p.status || 'available').replace(/"/g, '""')}"`,
       `"${(p.file_path || '').replace(/"/g, '""')}"`,
     ]);
@@ -201,9 +201,11 @@ export const AdminPapersView: React.FC<AdminPapersViewProps> = ({
                 {filtered.map((paper) => {
                   const unitCode = paper.unit_code || (paper as any).unitCode || '—';
                   const paperTitle = paper.paper_title || (paper as any).unitName || 'Examination Paper';
+                  const isPaperFree = paper.is_free || paper.price === 0 || paper.price === '0' || paper.price === 'KSh 0';
+                  const displayPrice = isPaperFree
+                    ? 'KSh 0 (FREE)'
+                    : (typeof paper.price === 'number' ? `KSh ${paper.price}` : paper.price || 'KSh 50');
                   const isAvailable = paper.status === 'available';
-                  const displayPrice =
-                    typeof paper.price === 'number' ? `KSh ${paper.price}` : paper.price || 'KSh 50';
 
                   return (
                     <tr key={paper.id} className="hover:bg-slate-800/40 transition-colors">

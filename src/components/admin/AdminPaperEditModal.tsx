@@ -58,12 +58,14 @@ export const AdminPaperEditModal: React.FC<AdminPaperEditModalProps> = ({
     if (editingPaper) {
       setFormUnitCode(editingPaper.unit_code || (editingPaper as any).unitCode || '');
       setFormPaperTitle(editingPaper.paper_title || (editingPaper as any).unitName || '');
-      const cleanPrice = String(editingPaper.price || defaultPrice).replace(/[^\d]/g, '');
-      setFormPrice(cleanPrice || '50');
+      const rawPrice = editingPaper.price !== undefined && editingPaper.price !== null ? editingPaper.price : defaultPrice;
+      const isPaperFree = !!editingPaper.is_free || rawPrice === 0 || rawPrice === '0' || rawPrice === 'KSh 0';
+      const cleanPrice = String(rawPrice).replace(/[^\d]/g, '');
+      setFormPrice(isPaperFree ? '0' : (cleanPrice || '50'));
       setFormStatus(editingPaper.status || 'available');
       setFormFilePath(editingPaper.file_path || '');
       setFormEligiblePages(editingPaper.eligible_pages || []);
-      setIsFree(!!editingPaper.is_free);
+      setIsFree(isPaperFree);
       setSelectedFile(null);
       setUploadedFileName('');
       setUploadedFileSize('');
@@ -237,8 +239,9 @@ export const AdminPaperEditModal: React.FC<AdminPaperEditModalProps> = ({
     setUploadError('');
     const formattedCode = formUnitCode.trim().toUpperCase();
     const formattedTitle = formPaperTitle.trim();
-    const cleanPrice = parseInt(formPrice.replace(/[^\d]/g, '') || '50', 10);
-    const formattedPrice = `KSh ${cleanPrice}`;
+    const cleanPrice = isFree ? 0 : (formPrice.trim() === '0' ? 0 : parseInt(formPrice.replace(/[^\d]/g, '') || '0', 10));
+    const effectiveIsFree = isFree || cleanPrice === 0;
+    const formattedPrice = effectiveIsFree ? 'KSh 0' : `KSh ${cleanPrice}`;
 
     const formData = new FormData();
     if (editingPaper?.id) {
@@ -247,23 +250,23 @@ export const AdminPaperEditModal: React.FC<AdminPaperEditModalProps> = ({
     }
     formData.append('unit_code', formattedCode);
     formData.append('paper_title', formattedTitle);
-    formData.append('price', formattedPrice);
+    formData.append('price', String(cleanPrice));
     formData.append('status', formStatus);
 
     if (selectedFile) {
       formData.append('pdfFile', selectedFile);
     }
     formData.append('eligible_pages', JSON.stringify(formEligiblePages));
-    formData.append('is_free', String(isFree));
+    formData.append('is_free', String(effectiveIsFree));
 
     const savedPaperMeta: Paper = {
       id: editingPaper?.id || `paper-${Date.now()}`,
       unit_code: formattedCode,
       paper_title: formattedTitle,
-      price: formattedPrice,
+      price: cleanPrice,
       status: formStatus,
       file_path: formFilePath.trim() || uploadedFileName || `${formattedCode}_Exam.pdf`,
-      is_free: isFree,
+      is_free: effectiveIsFree,
     };
 
     const saveResult = await onSave(formData, savedPaperMeta);
@@ -630,15 +633,23 @@ export const AdminPaperEditModal: React.FC<AdminPaperEditModalProps> = ({
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-bold text-slate-300 mb-1">Price (KSh)</label>
+                <label className="block font-bold text-slate-300 mb-1">
+                  Price (KSh) {isFree && <span className="text-[#00D26A] text-xs font-semibold ml-1">(Free Document)</span>}
+                </label>
                 <input
                   type="number"
                   value={isFree ? '0' : formPrice}
                   onChange={(e) => {
-                      if (!isFree) setFormPrice(e.target.value);
+                    const val = e.target.value;
+                    setFormPrice(val);
+                    if (val === '0') {
+                      setIsFree(true);
+                    } else if (isFree && val !== '0') {
+                      setIsFree(false);
+                    }
                   }}
                   min="0"
-                  required={!isFree}
+                  required
                   disabled={isFree}
                   className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-[#00D26A] disabled:opacity-50"
                 />
@@ -662,10 +673,20 @@ export const AdminPaperEditModal: React.FC<AdminPaperEditModalProps> = ({
                 type="checkbox"
                 id="isFreeCheckbox"
                 checked={isFree}
-                onChange={(e) => setIsFree(e.target.checked)}
-                className="w-4 h-4 text-[#00D26A] bg-slate-950 border-slate-700 rounded focus:ring-[#00D26A]"
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setIsFree(checked);
+                  if (checked) {
+                    setFormPrice('0');
+                  } else {
+                    setFormPrice('50');
+                  }
+                }}
+                className="w-4 h-4 text-[#00D26A] bg-slate-950 border-slate-700 rounded focus:ring-[#00D26A] cursor-pointer"
               />
-              <label htmlFor="isFreeCheckbox" className="font-bold text-slate-300 cursor-pointer">Mark as Free Document</label>
+              <label htmlFor="isFreeCheckbox" className="font-bold text-slate-300 cursor-pointer">
+                Mark as Free Document (KSh 0)
+              </label>
             </div>
           </div>
 

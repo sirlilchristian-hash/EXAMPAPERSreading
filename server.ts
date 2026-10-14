@@ -102,7 +102,7 @@ function getDocumentAccessUrl(req: express.Request, token: string): string {
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = 3000;
 
 // Configure Multer memory storage for PDF file uploads (25MB limit)
 const upload = multer({
@@ -150,6 +150,56 @@ async function generatePageSpecificPDF(
   copiedPages.forEach((p) => newDoc.addPage(p));
   
   return await newDoc.save();
+}
+
+const pdfPageCountCache = new Map<string, { count: number; timestamp: number }>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+export async function getAuthoritativePdfPageCount(filePath: string): Promise<{ pageCount: number | null; error?: string }> {
+  if (!filePath || typeof filePath !== 'string') {
+    return { pageCount: null, error: "Invalid file path provided." };
+  }
+
+  const normalizedPath = filePath.trim();
+  const cached = pdfPageCountCache.get(normalizedPath);
+  const now = Date.now();
+  if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
+    return { pageCount: cached.count };
+  }
+
+  try {
+    const { data: fileData, error: downloadErr } = await supabaseAdmin.storage.from("Papers").download(normalizedPath);
+    if (downloadErr || !fileData) {
+      return { pageCount: null, error: `Storage download failed: ${downloadErr?.message || "Object not found"}` };
+    }
+
+    const arrayBuffer = await fileData.arrayBuffer();
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+      return { pageCount: null, error: "Downloaded PDF file is empty." };
+    }
+
+    const pdfDoc = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    const pageCount = pdfDoc.getPageCount();
+
+    if (pageCount <= 0 || isNaN(pageCount)) {
+      return { pageCount: null, error: "Invalid PDF document: page count is zero or negative." };
+    }
+
+    pdfPageCountCache.set(normalizedPath, { count: pageCount, timestamp: now });
+    return { pageCount };
+  } catch (err: any) {
+    console.error(`[PDF PAGE COUNT ERROR] Failed to parse PDF at '${normalizedPath}':`, err?.message || err);
+    return { pageCount: null, error: `PDF parsing error: ${err?.message || "Corrupt or invalid PDF format"}` };
+  }
+}
+
+export function computeAuthoritativeLifoPages(totalPages: number, quantity: number): number[] {
+  const n = Number(totalPages);
+  const q = Number(quantity);
+  if (isNaN(n) || isNaN(q) || !Number.isInteger(q) || q < 1 || q > n) {
+    return [];
+  }
+  return Array.from({ length: q }, (_, i) => n - q + i + 1);
 }
 
 let aiClient: GoogleGenAI | null = null;
@@ -601,7 +651,9 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
     const paperTitle = (req.body?.paper_title || req.body?.unitName || req.body?.paperTitle || '').trim();
     const rawPrice = (req.body?.price || '').toString().trim();
     const status = (req.body?.status || 'available').trim().toLowerCase();
-    const isFree = req.body?.is_free === 'true';
+    const rawPriceNumeric = parseInt(rawPrice.replace(/\D/g, '') || '0', 10);
+    const isFree = req.body?.is_free === 'true' || req.body?.is_free === true || rawPriceNumeric === 0;
+    const numericPrice = isFree ? 0 : rawPriceNumeric;
 
     // 1. Server-side Validation
     if (!unitCode || unitCode.length < 2) {
@@ -612,11 +664,10 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
       return res.status(400).json({ error: "Invalid Paper Title. Title must be at least 3 characters." });
     }
 
-    const numericPrice = parseInt(rawPrice.replace(/\D/g, '') || '0', 10);
     if (!isFree && (isNaN(numericPrice) || numericPrice < 0)) {
       return res.status(400).json({ error: "Invalid Price. Price must be a non-negative amount (e.g. 0 or 50)." });
     }
-    const formattedPrice = rawPrice.startsWith('KSh') ? rawPrice : `KSh ${numericPrice}`;
+    const formattedPrice = isFree ? 'KSh 0' : (rawPrice.startsWith('KSh') ? rawPrice : `KSh ${numericPrice}`);
 
     if (status !== 'available' && status !== 'unavailable') {
       return res.status(400).json({ error: "Invalid status. Supported values are 'available' or 'unavailable'." });
@@ -712,9 +763,6 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
             price: numericPrice,
             status: status,
             file_path: storagePath,
-            eligible_pages: eligiblePages.length > 0 ? eligiblePages : null,
-            total_pages: truePageCount,
-            is_free: isFree,
           },
         ])
         .select()
@@ -743,6 +791,7 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
         isAvailable: insertedData.status === 'available',
         fileName: insertedData.file_path,
         fileSize: `${(file!.size / (1024 * 1024)).toFixed(1)} MB`,
+        is_free: insertedData.price === 0,
       };
 
       return res.status(201).json({ success: true, paper: safePaper });
@@ -828,8 +877,6 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
               price: numericPrice,
               status: status,
               file_path: mergedStoragePath,
-              eligible_pages: eligiblePages.length > 0 ? eligiblePages : null,
-              is_free: isFree,
             })
             .eq("id", paperId)
             .select()
@@ -864,6 +911,7 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
             fileName: updatedData.file_path,
             fileSize: `${(mergedPdfBytes.length / (1024 * 1024)).toFixed(2)} MB`,
             merged: true,
+            is_free: updatedData.price === 0,
           };
 
           return res.json({ success: true, paper: safePaper, message: "Document merged successfully." });
@@ -895,8 +943,6 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
             price: numericPrice,
             status: status,
             file_path: newStoragePath,
-            total_pages: truePageCount,
-            is_free: isFree,
           })
           .eq("id", paperId)
           .select()
@@ -929,6 +975,7 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
           isAvailable: updatedData.status === 'available',
           fileName: updatedData.file_path,
           fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+          is_free: updatedData.price === 0,
         };
 
         return res.json({ success: true, paper: safePaper });
@@ -939,9 +986,8 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
           .update({
             unit_code: unitCode,
             paper_title: paperTitle,
-            price: isFree ? 'KSh 0' : formattedPrice,
+            price: numericPrice,
             status: status,
-            is_free: isFree,
           })
           .eq("id", paperId)
           .select()
@@ -962,6 +1008,7 @@ app.post("/api/papers/upload", requireAdmin, requireRole(["super_admin", "conten
           status: updatedData.status,
           isAvailable: updatedData.status === 'available',
           fileName: updatedData.file_path,
+          is_free: updatedData.price === 0,
         };
 
         return res.json({ success: true, paper: safePaper });
@@ -1142,20 +1189,38 @@ app.get("/api/papers", async (req, res) => {
     }
 
     if (papers) {
-      const normalized = papers.map((p) => ({
-        id: p.id,
-        unit_code: p.unit_code,
-        paper_title: p.paper_title,
-        unitCode: p.unit_code,
-        unitName: p.paper_title,
-        price: p.is_free ? 'KSh 0' : (typeof p.price === 'number' ? `KSh ${p.price}` : String(p.price || 'KSh 50')),
-        status: p.status,
-        isAvailable: p.status === 'available',
-        file_path: p.file_path,
-        fileName: p.file_path,
-        eligible_pages: Array.isArray(p.eligible_pages) && p.eligible_pages.length >= 6 ? p.eligible_pages : Array.from({ length: 12 }, (_, i) => i + 1),
-        created_at: p.created_at,
-        createdAt: p.created_at,
+      const normalized = await Promise.all(papers.map(async (p) => {
+        const isFree = p.price === 0 || p.price === '0' || p.price === 'KSh 0' || p.is_free === true;
+        let totalPages = Number(p.total_pages);
+        if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+          if (p.file_path) {
+            const countResult = await getAuthoritativePdfPageCount(p.file_path);
+            if (countResult.pageCount) {
+              totalPages = countResult.pageCount;
+            }
+          }
+        }
+        if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+          totalPages = 12;
+        }
+
+        return {
+          id: p.id,
+          unit_code: p.unit_code,
+          paper_title: p.paper_title,
+          unitCode: p.unit_code,
+          unitName: p.paper_title,
+          price: isFree ? 'KSh 0' : (typeof p.price === 'number' ? `KSh ${p.price}` : String(p.price || 'KSh 50')),
+          status: p.status,
+          isAvailable: p.status === 'available',
+          file_path: p.file_path,
+          fileName: p.file_path,
+          eligible_pages: Array.isArray(p.eligible_pages) && p.eligible_pages.length >= 6 ? p.eligible_pages : Array.from({ length: totalPages }, (_, i) => i + 1),
+          created_at: p.created_at,
+          createdAt: p.created_at,
+          total_pages: totalPages,
+          is_free: isFree,
+        };
       }));
       return res.json(normalized);
     }
@@ -1291,21 +1356,36 @@ app.get("/api/papers/:id", async (req, res) => {
       return res.status(404).json({ error: "Paper not found" });
     }
 
+    const isFree = p.price === 0 || p.price === '0' || p.price === 'KSh 0' || p.is_free === true;
+    let totalPages = Number(p.total_pages);
+    if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+      if (p.file_path) {
+        const countResult = await getAuthoritativePdfPageCount(p.file_path);
+        if (countResult.pageCount) {
+          totalPages = countResult.pageCount;
+        }
+      }
+    }
+    if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+      totalPages = 12;
+    }
+
     const normalized = {
       id: p.id,
       unit_code: p.unit_code,
       paper_title: p.paper_title,
       unitCode: p.unit_code,
       unitName: p.paper_title,
-      price: typeof p.price === 'number' ? `KSh ${p.price}` : String(p.price || 'KSh 50'),
+      price: isFree ? 'KSh 0' : (typeof p.price === 'number' ? `KSh ${p.price}` : String(p.price || 'KSh 50')),
       status: p.status,
       isAvailable: p.status === 'available',
       file_path: p.file_path,
       fileName: p.file_path,
-      eligible_pages: Array.isArray(p.eligible_pages) && p.eligible_pages.length >= 6 ? p.eligible_pages : Array.from({ length: 12 }, (_, i) => i + 1),
+      eligible_pages: Array.isArray(p.eligible_pages) && p.eligible_pages.length >= 6 ? p.eligible_pages : Array.from({ length: totalPages }, (_, i) => i + 1),
       created_at: p.created_at,
       createdAt: p.created_at,
-      total_pages: p.total_pages || 12,
+      total_pages: totalPages,
+      is_free: isFree,
     };
     return res.json(normalized);
   } catch (err: any) {
@@ -1609,88 +1689,167 @@ app.post("/api/orders/whatsapp", async (req, res) => {
 
 
 app.post("/api/free-purchase", async (req, res) => {
-  const { paperId, first_name, firstName, studentFirstName, second_name, secondName, studentSecondName, phone, email, studentEmail } = req.body;
-  const targetPaperId = paperId;
-  const targetFirstName = (first_name || firstName || studentFirstName || '').trim();
-  const targetSecondName = (second_name || secondName || studentSecondName || '').trim();
-  const targetEmail = (email || studentEmail || '').trim().toLowerCase();
-
-  // 1. Validate
-  if (!targetPaperId) return res.status(400).json({ success: false, error: "Paper ID is required." });
-  if (!targetFirstName || !targetSecondName) return res.status(400).json({ success: false, error: "Name is required." });
-  if (!targetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) return res.status(400).json({ success: false, error: "Invalid email." });
-
-  // 2. Query authoritative price
-  const { data: dbPaper, error: paperErr } = await supabaseAdmin.from("Papers").select("*").eq("id", targetPaperId).single();
-  if (paperErr || !dbPaper) return res.status(404).json({ success: false, error: "Paper not found." });
-
-  // 3. Authorization: Price MUST be zero
-  const price = typeof dbPaper.price === 'string' ? parseInt(dbPaper.price.replace(/\D/g, '') || '0', 10) : (dbPaper.price || 0);
-  if (price !== 0) return res.status(403).json({ success: false, error: "This paper is not free." });
-
-  // 4. Create customer/order/payment record (mimic existing flow)
-  // For brevity, we reuse the existing customer initialization logic or create a new customer
-  // We'll create a simple customer/order/payment for now, mimicking the structure.
-  
-  const { data: customer, error: custErr } = await supabaseAdmin.from("customers").insert({
-      first_name: targetFirstName,
-      second_name: targetSecondName,
-      phone: phone || '0000000000',
-      email: targetEmail
-  }).select("id").single();
-  
-  if (custErr || !customer) return res.status(500).json({ success: false, error: "Failed to create customer." });
-
-  const { data: newOrder, error: orderErr } = await supabaseAdmin.from("Orders").insert({
-      customer_id: customer.id,
-      paper_id: targetPaperId,
-      amount: 0,
-      status: 'paid', // Mark as paid for fulfillment
-      total_amount: 0
-  }).select("id").single();
-  
-  if (orderErr || !newOrder) return res.status(500).json({ success: false, error: "Failed to create order." });
-
-  const { error: paymentErr } = await supabaseAdmin.from("payments").insert({
-      order_id: newOrder.id,
-      amount: 0,
-      status: 'free',
-      phone: phone || '0000000000'
-  });
-  
-  // NOTE: Fulfillment logic (token generation and email) would be called here.
-  
-  // Generate secure document access token
-  const accessToken = generateAccessToken(newOrder.id);
-  const openDocumentUrl = getDocumentAccessUrl(req, accessToken);
-
-  // Associate email with orderId
-  saveOrderEmail(newOrder.id, targetEmail);
-
-  // Trigger SMTP document activation email using existing Nodemailer email service
-  let emailStatus = 'pending';
-  let emailError: string | null = null;
   try {
-    console.log(`[FREE PURCHASE] Sending document activation email to: ${targetEmail}`);
-    const emailResult = await sendActivationEmail({
-      to: targetEmail,
-      firstName: targetFirstName,
-      paperTitle: dbPaper.paper_title || 'Purchased Document',
-      openDocumentUrl,
-    });
-    emailStatus = emailResult.status;
-    if (emailResult.error) emailError = emailResult.error;
-    orderEmailStatusMap.set(newOrder.id, {
-      status: emailResult.status,
-      sentAt: new Date().toISOString(),
-      error: emailResult.error,
-    });
-  } catch (mailErr: any) {
-    emailStatus = 'failed';
-    emailError = mailErr?.message || 'Email delivery exception';
-  }
+    const { paperId, first_name, firstName, studentFirstName, second_name, secondName, studentSecondName, phone, email, studentEmail } = req.body;
+    const targetPaperId = paperId;
+    const targetFirstName = (first_name || firstName || studentFirstName || '').trim();
+    const targetSecondName = (second_name || secondName || studentSecondName || '').trim();
+    const targetEmail = (email || studentEmail || '').trim().toLowerCase();
 
-  return res.json({ success: true, orderId: newOrder.id, emailStatus, emailError });
+    // 1. Validate
+    if (!targetPaperId) return res.status(400).json({ success: false, error: "Paper ID is required." });
+    if (!targetFirstName || !targetSecondName) return res.status(400).json({ success: false, error: "Name is required." });
+    if (!targetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) return res.status(400).json({ success: false, error: "Invalid email." });
+
+    // 2. Query authoritative price
+    const { data: dbPaper, error: paperErr } = await supabaseAdmin.from("Papers").select("*").eq("id", targetPaperId).single();
+    if (paperErr || !dbPaper) return res.status(404).json({ success: false, error: "Paper not found." });
+
+    // 3. Authorization: Price MUST be zero
+    const price = typeof dbPaper.price === 'string' ? parseInt(dbPaper.price.replace(/\D/g, '') || '0', 10) : (dbPaper.price || 0);
+    if (price !== 0) return res.status(403).json({ success: false, error: "This paper is not free." });
+
+    // 4. Customer management: Find or create customer record
+    let customerId: string | null = null;
+    const normalizedPhone = phone ? normalizeKenyanPhone(phone) : null;
+    const safePhone = normalizedPhone || '254700000000';
+
+    if (normalizedPhone) {
+      const { data: existingCustomer } = await supabaseAdmin
+        .from("customers")
+        .select("id")
+        .eq("phone", normalizedPhone)
+        .maybeSingle();
+
+      if (existingCustomer?.id) {
+        customerId = existingCustomer.id;
+        try {
+          await supabaseAdmin
+            .from("customers")
+            .update({ first_name: targetFirstName, second_name: targetSecondName, email: targetEmail })
+            .eq("id", customerId);
+        } catch {}
+      }
+    }
+
+    if (!customerId) {
+      const { data: existingByEmail } = await supabaseAdmin
+        .from("customers")
+        .select("id")
+        .eq("email", targetEmail)
+        .maybeSingle();
+
+      if (existingByEmail?.id) {
+        customerId = existingByEmail.id;
+        try {
+          await supabaseAdmin
+            .from("customers")
+            .update({ first_name: targetFirstName, second_name: targetSecondName })
+            .eq("id", customerId);
+        } catch {}
+      }
+    }
+
+    if (!customerId) {
+      const { data: newCustomer, error: custErr } = await supabaseAdmin
+        .from("customers")
+        .insert({
+          first_name: targetFirstName,
+          second_name: targetSecondName,
+          phone: safePhone,
+          email: targetEmail,
+        })
+        .select("id")
+        .single();
+
+      if (!custErr && newCustomer) {
+        customerId = newCustomer.id;
+      } else {
+        const { data: fallbackCust, error: fallbackErr } = await supabaseAdmin
+          .from("customers")
+          .insert({
+            first_name: targetFirstName,
+            second_name: targetSecondName,
+            phone: safePhone,
+          })
+          .select("id")
+          .single();
+        if (fallbackCust) {
+          customerId = fallbackCust.id;
+        } else {
+          console.error("Customer creation error in free-purchase:", fallbackErr || custErr);
+          return res.status(500).json({ success: false, error: "Failed to initialize customer record." });
+        }
+      }
+    }
+
+    const { data: newOrder, error: orderErr } = await supabaseAdmin.from("Orders").insert({
+        customer_id: customerId,
+        paper_id: targetPaperId,
+        amount: 0,
+        status: 'paid', // Mark as paid for fulfillment
+    }).select("id").single();
+    
+    if (orderErr || !newOrder) {
+      console.error("Order creation error in free-purchase:", orderErr);
+      return res.status(500).json({ success: false, error: "Failed to create order." });
+    }
+
+    try {
+      await supabaseAdmin.from("payments").insert({
+          order_id: newOrder.id,
+          amount: 0,
+          status: 'free',
+          phone: safePhone,
+          mpesa_receipt: 'FREE_ACCESS',
+          transaction_date: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn("Payment insert note in free-purchase:", err);
+    }
+    
+    // Generate secure document access token
+    const accessToken = generateAccessToken(newOrder.id);
+    const openDocumentUrl = getDocumentAccessUrl(req, accessToken);
+
+    // Associate email with orderId
+    saveOrderEmail(newOrder.id, targetEmail);
+
+    // Trigger SMTP document activation email using existing Nodemailer email service
+    let emailStatus = 'pending';
+    let emailError: string | null = null;
+    try {
+      console.log(`[FREE PURCHASE] Sending document activation email to: ${targetEmail}`);
+      const emailResult = await sendActivationEmail({
+        to: targetEmail,
+        firstName: targetFirstName,
+        paperTitle: dbPaper.paper_title || 'Purchased Document',
+        openDocumentUrl,
+      });
+      emailStatus = emailResult.status;
+      if (emailResult.error) emailError = emailResult.error;
+      orderEmailStatusMap.set(newOrder.id, {
+        status: emailResult.status,
+        sentAt: new Date().toISOString(),
+        error: emailResult.error,
+      });
+    } catch (mailErr: any) {
+      emailStatus = 'failed';
+      emailError = mailErr?.message || 'Email delivery exception';
+    }
+
+    return res.json({ 
+      success: true, 
+      orderId: newOrder.id, 
+      accessToken, 
+      openDocumentUrl, 
+      emailStatus, 
+      emailError 
+    });
+  } catch (err: any) {
+    console.error("Free purchase unexpected error:", err);
+    return res.status(500).json({ success: false, error: err?.message || "Internal server error" });
+  }
 });
 
 app.post("/api/mpesa/stkpush", async (req, res) => {
@@ -1798,18 +1957,41 @@ app.post("/api/mpesa/stkpush", async (req, res) => {
     const purchaseType = (req.body.purchase_type || (req.body.selected_pages || req.body.page_quantity ? 'pages' : 'full')).toLowerCase();
 
     if (purchaseType === 'pages') {
-      const totalPages = Number(dbPaper.total_pages) || (Array.isArray(dbPaper.eligible_pages) ? dbPaper.eligible_pages.length : 12);
-      const qty = parseInt(req.body.page_quantity || 1, 10);
-      if (isNaN(qty) || qty < 1 || qty > totalPages) {
+      let totalPages = Number(dbPaper.total_pages);
+      if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+        if (dbPaper.file_path) {
+          const countRes = await getAuthoritativePdfPageCount(dbPaper.file_path);
+          if (countRes.pageCount) {
+            totalPages = countRes.pageCount;
+          }
+        }
+      }
+
+      if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
         return res.status(400).json({
           success: false,
           outcome: "definite_failure",
-          error: `Invalid page quantity requested. Must be between 1 and ${totalPages}.`
+          error: "Document page count could not be verified. Page-based purchase unavailable."
         });
       }
 
-      // Deterministic last-N-pages selection: [totalPages - qty + 1, ..., totalPages]
-      const targetPages = Array.from({ length: qty }, (_, i) => totalPages - qty + i + 1);
+      const qty = parseInt(req.body.page_quantity || (Array.isArray(req.body.selected_pages) ? req.body.selected_pages.length : 1), 10);
+      if (isNaN(qty) || !Number.isInteger(qty) || qty < 1 || qty > totalPages) {
+        return res.status(400).json({
+          success: false,
+          outcome: "definite_failure",
+          error: `Invalid page quantity requested. Must be an integer between 1 and ${totalPages}.`
+        });
+      }
+
+      const targetPages = computeAuthoritativeLifoPages(totalPages, qty);
+      if (targetPages.length !== qty) {
+        return res.status(400).json({
+          success: false,
+          outcome: "definite_failure",
+          error: "Invalid LIFO page selection computation."
+        });
+      }
 
       const pricingResult = calculateAuthoritativePagesPrice(dbPaper, targetPages);
       if (!pricingResult.isValid) {
@@ -1826,7 +2008,11 @@ app.post("/api/mpesa/stkpush", async (req, res) => {
       unitPrice = Math.round((orderAmount / pageQuantity) * 100) / 100;
     } else {
       if (isNaN(orderAmount) || orderAmount <= 0) {
-        return res.status(400).json({ success: false, outcome: "definite_failure", error: "Invalid paper price configuration in catalog." });
+        return res.status(400).json({ 
+          success: false, 
+          outcome: "definite_failure", 
+          error: "Zero documents and free papers do not trigger M-Pesa payment. Please use the Get Free Paper option." 
+        });
       }
     }
 
@@ -1900,10 +2086,6 @@ app.post("/api/mpesa/stkpush", async (req, res) => {
         paper_id: targetPaperId,
         amount: orderAmount,
         status: 'pending',
-        purchased_pages: purchasedPages,
-        page_quantity: pageQuantity,
-        unit_price: unitPrice,
-        total_amount: orderAmount
       })
       .select("id")
       .single();
@@ -2486,31 +2668,28 @@ app.post("/api/admin/simulate-successful-payment", async (req, res) => {
     const purchaseType = (req.body.purchase_type || (req.body.selected_pages || req.body.page_quantity ? 'pages' : 'full')).toLowerCase();
 
     if (purchaseType === 'pages') {
-      const eligiblePages: number[] = Array.isArray(dbPaper.eligible_pages) ? dbPaper.eligible_pages : [];
-      let targetPages: number[] = [];
-
-      if (Array.isArray(req.body.selected_pages) && req.body.selected_pages.length > 0) {
-        targetPages = Array.from(new Set<number>(req.body.selected_pages.map((p: any) => Number(p))))
-          .filter((p: number): p is number => !isNaN(p) && p > 0)
-          .sort((a: number, b: number) => a - b);
-      } else if (req.body.page_quantity) {
-        const qty = parseInt(req.body.page_quantity, 10);
-        if (isNaN(qty) || qty < 6 || qty > eligiblePages.length) {
-          return res.status(400).json({ success: false, error: "Invalid page quantity requested." });
+      let totalPages = Number(dbPaper.total_pages);
+      if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+        if (dbPaper.file_path) {
+          const countRes = await getAuthoritativePdfPageCount(dbPaper.file_path);
+          if (countRes.pageCount) {
+            totalPages = countRes.pageCount;
+          }
         }
-        targetPages = eligiblePages.slice(-qty).reverse();
       }
 
-      if (targetPages.length < 6) {
-        return res.status(400).json({ success: false, error: "Minimum purchase is 6 pages." });
+      if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
+        return res.status(400).json({ success: false, error: "Document page count could not be verified. Page-based purchase unavailable." });
       }
 
-      const invalidPages = targetPages.filter((p) => !eligiblePages.includes(p));
-      if (invalidPages.length > 0) {
-        return res.status(400).json({
-          success: false,
-          error: `Pages [${invalidPages.join(', ')}] are not eligible for purchase.`
-        });
+      const qty = parseInt(req.body.page_quantity || (Array.isArray(req.body.selected_pages) ? req.body.selected_pages.length : 1), 10);
+      if (isNaN(qty) || !Number.isInteger(qty) || qty < 1 || qty > totalPages) {
+        return res.status(400).json({ success: false, error: `Invalid page quantity requested. Must be an integer between 1 and ${totalPages}.` });
+      }
+
+      const targetPages = computeAuthoritativeLifoPages(totalPages, qty);
+      if (targetPages.length !== qty) {
+        return res.status(400).json({ success: false, error: "Invalid LIFO page selection computation." });
       }
 
       const pricingResult = calculateAuthoritativePagesPrice(dbPaper, targetPages);
@@ -3180,9 +3359,8 @@ app.get("/api/transactions", requireAdmin, requireRole(["super_admin", "finance_
         Orders (
           id,
           paper_id,
-          purchased_pages,
-          page_quantity,
-          unit_price,
+          amount,
+          status,
           customers (first_name, second_name, phone)
         )
       `)
@@ -3216,8 +3394,7 @@ app.get("/api/transactions", requireAdmin, requireRole(["super_admin", "finance_
     
     const formatted = payments.map((p: any) => {
       const paper = p.Orders?.paper_id ? paperMap.get(p.Orders.paper_id) : null;
-      const purchasedPages = Array.isArray(p.Orders?.purchased_pages) ? p.Orders.purchased_pages : null;
-      const isPagesPurchase = purchasedPages && purchasedPages.length > 0;
+      const isFree = p.status === 'free' || p.amount === 0;
 
       return {
         id: p.id,
@@ -3226,14 +3403,14 @@ app.get("/api/transactions", requireAdmin, requireRole(["super_admin", "finance_
         phone: p.phone,
         unitCode: paper?.unit_code || '',
         unitName: paper?.paper_title || '',
-        price: `KSh ${p.amount}`,
-        mpesaReceipt: p.mpesa_receipt || 'PENDING',
-        status: p.status === 'completed' ? 'Completed' : (p.status === 'pending' ? 'Pending' : 'Failed'),
+        price: isFree ? 'KSh 0' : `KSh ${p.amount}`,
+        mpesaReceipt: p.mpesa_receipt || (isFree ? 'FREE' : '—'),
+        status: isFree ? 'Free' : (p.status === 'completed' ? 'Completed' : (p.status === 'pending' ? 'Pending' : 'Failed')),
         timestamp: p.created_at,
-        purchased_pages: purchasedPages,
-        page_quantity: p.Orders?.page_quantity || (isPagesPurchase ? purchasedPages.length : null),
-        unit_price: p.Orders?.unit_price || null,
-        purchase_type: isPagesPurchase ? 'pages' : 'full',
+        purchased_pages: null,
+        page_quantity: null,
+        unit_price: null,
+        purchase_type: 'full',
       };
     });
     return res.json(formatted);
