@@ -32,6 +32,7 @@ export interface PricingCalculationResult {
 export function calculateAuthoritativePagesPrice(
   paper: {
     price?: number | string;
+    total_pages?: number;
     eligible_pages?: number[] | null;
     pricing_model?: PagePricingModel | string;
     fixed_page_price?: number;
@@ -41,8 +42,11 @@ export function calculateAuthoritativePagesPrice(
   selectedPages: number[],
   minPagesRequired: number = 6
 ): PricingCalculationResult {
-  const rawEligible = Array.isArray(paper.eligible_pages) ? paper.eligible_pages : [];
-  const eligible = rawEligible.length >= minPagesRequired ? rawEligible : Array.from({ length: 12 }, (_, i) => i + 1);
+  const docTotal = Number(paper.total_pages) || (Array.isArray(paper.eligible_pages) ? paper.eligible_pages.length : 0);
+  const rawEligible = Array.isArray(paper.eligible_pages) && paper.eligible_pages.length > 0
+    ? paper.eligible_pages
+    : (docTotal > 0 ? Array.from({ length: docTotal }, (_, i) => i + 1) : []);
+  const eligible = rawEligible;
   const normalizedPages = Array.from(new Set(selectedPages.map((p) => Number(p))))
     .filter((p) => !isNaN(p) && p > 0)
     .sort((a, b) => a - b);

@@ -36,7 +36,7 @@ export async function fetchPapersFromSupabase(): Promise<{
   try {
     const result = await supabase
       .from('Papers')
-      .select('id, created_at, unit_code, paper_title, price, file_path, status')
+      .select('id, created_at, unit_code, paper_title, price, file_path, status, total_pages')
       .order('created_at', { ascending: false });
 
     if (result.error) {
@@ -46,6 +46,7 @@ export async function fetchPapersFromSupabase(): Promise<{
 
     const loadedPapers: Paper[] = (result.data || []).map((row: any) => {
       const isFree = row.price === 0 || row.price === '0' || row.price === 'KSh 0';
+      const parsedPages = Number(row.total_pages);
       return {
         id: String(row.id),
         created_at: row.created_at,
@@ -55,6 +56,7 @@ export async function fetchPapersFromSupabase(): Promise<{
         file_path: row.file_path || null,
         status: typeof row.status === 'string' ? row.status : 'available',
         is_free: isFree,
+        total_pages: parsedPages && !isNaN(parsedPages) && parsedPages > 0 ? parsedPages : undefined,
       };
     });
 

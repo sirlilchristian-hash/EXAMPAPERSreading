@@ -240,8 +240,10 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
   const [pageQuantity, setPageQuantity] = useState<number>(6);
   const [isDetailsExpanded, setIsDetailsExpanded] = useState<boolean>(false);
 
-  const totalPagesForSelected = selectedPaper ? (Number(selectedPaper.total_pages) || 12) : 12;
-  const lastNPages = Array.from({ length: pageQuantity }, (_, i) => totalPagesForSelected - pageQuantity + i + 1);
+  const totalPagesForSelected = selectedPaper
+    ? (Number(selectedPaper.total_pages) || (Array.isArray(selectedPaper.eligible_pages) ? selectedPaper.eligible_pages.length : 1))
+    : 1;
+  const lastNPages = Array.from({ length: pageQuantity }, (_, i) => Math.max(1, totalPagesForSelected - pageQuantity + i + 1));
 
   const pagesPricing = selectedPaper
     ? calculateAuthoritativePagesPrice(selectedPaper, lastNPages)
@@ -384,7 +386,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
         price: typeof adminItem.price === 'number' ? `KSh ${adminItem.price}` : (adminItem.price || 'KSh 50'),
         status: isPAvailable(adminItem) ? 'available' : 'unavailable',
         eligible_pages: adminItem.eligible_pages,
-        total_pages: adminItem.total_pages || (Array.isArray(adminItem.eligible_pages) ? adminItem.eligible_pages.length : 12),
+        total_pages: Number(adminItem.total_pages) || (Array.isArray(adminItem.eligible_pages) ? adminItem.eligible_pages.length : undefined),
         pricing_model: adminItem.pricing_model,
         fixed_page_price: adminItem.fixed_page_price,
         page_price_ranges: adminItem.page_price_ranges,
@@ -1206,7 +1208,7 @@ export const SearchPaperWorkflow: React.FC<SearchPaperWorkflowProps> = ({
 
                     {/* OPTION B: Buy Selected Pages (Last-N-Pages) */}
                     {(() => {
-                      const totalPages = Number(selectedPaper.total_pages) || 12;
+                      const totalPages = Number(selectedPaper.total_pages) || (Array.isArray(selectedPaper.eligible_pages) ? selectedPaper.eligible_pages.length : 1);
 
                       return (
                         <div

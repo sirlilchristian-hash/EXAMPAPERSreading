@@ -7,7 +7,8 @@ import {
   isCheckoutSessionAuthorized,
   simulatedIdempotencyRegistry,
   getAuthoritativePdfPageCount,
-  computeAuthoritativeLifoPages
+  computeAuthoritativeLifoPages,
+  areNamesMatching
 } from './server.ts';
 
 test('1. Checkout Token Expiration and Secure Validation', () => {
@@ -158,6 +159,24 @@ test('8. Server-Authoritative LIFO Selection Engine (303 Pages)', () => {
   assert.deepStrictEqual(computeAuthoritativeLifoPages(303, -5), []);
   assert.deepStrictEqual(computeAuthoritativeLifoPages(303, 2.5), []);
   assert.deepStrictEqual(computeAuthoritativeLifoPages(303, 304), []);
+});
+
+test('9. Resilient Student Name Verification Matching', () => {
+  // Exact match
+  assert.strictEqual(areNamesMatching('Collins', 'Angima', 'Collins', 'Angima'), true);
+  // Case insensitivity
+  assert.strictEqual(areNamesMatching('collins', 'angima', 'COLLINS', 'ANGIMA'), true);
+  // Swapped first & second name
+  assert.strictEqual(areNamesMatching('Collins', 'Angima', 'Angima', 'Collins'), true);
+  // Extra whitespace and padding
+  assert.strictEqual(areNamesMatching(' Collins ', ' Angima ', 'Collins', 'Angima'), true);
+  // Full name entered in first field
+  assert.strictEqual(areNamesMatching('Collins Angima', '', 'Collins', 'Angima'), true);
+  // Single name match
+  assert.strictEqual(areNamesMatching('glo', 'glo', 'glo', 'glo'), true);
+  // Mismatch cases
+  assert.strictEqual(areNamesMatching('Collins', 'Angima', 'Peter', 'Kamau'), false);
+  assert.strictEqual(areNamesMatching('', '', 'Collins', 'Angima'), false);
 });
 
 console.log('All automated tests executed successfully.');

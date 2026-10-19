@@ -72,31 +72,28 @@ function AppContent() {
       setIsLoadingPapers(true);
       setError(null);
 
-      // 1. Attempt fetching from Supabase client if available
+      // 1. Fetch from backend API endpoint first (authoritative page counts from PDF analysis)
       try {
-        const { papers: sbPapers, error: sbError } = await fetchPapersFromSupabase();
-        if (!sbError && Array.isArray(sbPapers)) {
-          setPapers(sbPapers);
-          return;
+        const res = await fetch('/api/papers');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            setPapers(data);
+            return;
+          }
         }
-        if (sbError) {
-          console.info('Supabase query note, falling back to server repository:', sbError);
-        }
-      } catch (sbErr) {
-        console.info('Supabase connect note, using server API:', sbErr);
+      } catch (apiErr) {
+        console.info('Backend repository query note, checking Supabase direct:', apiErr);
       }
 
-      // 2. Fetch from backend API endpoint (persistent & reliable)
-      const res = await fetch('/api/papers');
-      if (!res.ok) {
-        throw new Error(`Failed to fetch papers from repository (${res.status})`);
+      // 2. Fallback fetching from Supabase client
+      const { papers: sbPapers, error: sbError } = await fetchPapersFromSupabase();
+      if (!sbError && Array.isArray(sbPapers)) {
+        setPapers(sbPapers);
+        return;
       }
-
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setPapers(data);
-      } else {
-        throw new Error('Invalid papers data format received');
+      if (sbError) {
+        throw new Error(sbError);
       }
     } catch (err: any) {
       const errorMessage =

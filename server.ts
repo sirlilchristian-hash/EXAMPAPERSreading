@@ -1195,13 +1195,14 @@ app.get("/api/papers", async (req, res) => {
         if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
           if (p.file_path) {
             const countResult = await getAuthoritativePdfPageCount(p.file_path);
-            if (countResult.pageCount) {
+            if (countResult.pageCount && countResult.pageCount > 0) {
               totalPages = countResult.pageCount;
+              supabaseAdmin.from("Papers").update({ total_pages: totalPages }).eq("id", p.id).then();
             }
           }
         }
         if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
-          totalPages = 12;
+          totalPages = 1;
         }
 
         return {
@@ -1361,13 +1362,14 @@ app.get("/api/papers/:id", async (req, res) => {
     if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
       if (p.file_path) {
         const countResult = await getAuthoritativePdfPageCount(p.file_path);
-        if (countResult.pageCount) {
+        if (countResult.pageCount && countResult.pageCount > 0) {
           totalPages = countResult.pageCount;
+          supabaseAdmin.from("Papers").update({ total_pages: totalPages }).eq("id", p.id).then();
         }
       }
     }
     if (!totalPages || isNaN(totalPages) || totalPages <= 0) {
-      totalPages = 12;
+      totalPages = 1;
     }
 
     const normalized = {
@@ -1723,30 +1725,10 @@ app.post("/api/free-purchase", async (req, res) => {
 
       if (existingCustomer?.id) {
         customerId = existingCustomer.id;
-        try {
-          await supabaseAdmin
-            .from("customers")
-            .update({ first_name: targetFirstName, second_name: targetSecondName, email: targetEmail })
-            .eq("id", customerId);
-        } catch {}
-      }
-    }
-
-    if (!customerId) {
-      const { data: existingByEmail } = await supabaseAdmin
-        .from("customers")
-        .select("id")
-        .eq("email", targetEmail)
-        .maybeSingle();
-
-      if (existingByEmail?.id) {
-        customerId = existingByEmail.id;
-        try {
-          await supabaseAdmin
-            .from("customers")
-            .update({ first_name: targetFirstName, second_name: targetSecondName })
-            .eq("id", customerId);
-        } catch {}
+        await supabaseAdmin
+          .from("customers")
+          .update({ first_name: targetFirstName, second_name: targetSecondName })
+          .eq("id", customerId);
       }
     }
 
@@ -1757,7 +1739,6 @@ app.post("/api/free-purchase", async (req, res) => {
           first_name: targetFirstName,
           second_name: targetSecondName,
           phone: safePhone,
-          email: targetEmail,
         })
         .select("id")
         .single();
@@ -1765,21 +1746,8 @@ app.post("/api/free-purchase", async (req, res) => {
       if (!custErr && newCustomer) {
         customerId = newCustomer.id;
       } else {
-        const { data: fallbackCust, error: fallbackErr } = await supabaseAdmin
-          .from("customers")
-          .insert({
-            first_name: targetFirstName,
-            second_name: targetSecondName,
-            phone: safePhone,
-          })
-          .select("id")
-          .single();
-        if (fallbackCust) {
-          customerId = fallbackCust.id;
-        } else {
-          console.error("Customer creation error in free-purchase:", fallbackErr || custErr);
-          return res.status(500).json({ success: false, error: "Failed to initialize customer record." });
-        }
+        console.error("Customer creation error in free-purchase:", custErr);
+        return res.status(500).json({ success: false, error: "Failed to initialize customer record." });
       }
     }
 
@@ -3719,138 +3687,355 @@ app.post("/api/admin/device-requests/:id/reject", requireAdmin, async (req, res)
     return res.json({ success: true });
 });
 
+export function areNamesMatching(
+  targetFirst?: string | null, 
+  targetSecond?: string | null, 
+  inputFirst?: string | null, 
+  inputSecond?: string | null
+): boolean {
+  const norm = (s?: string | null) => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, ' ');
+  const tf = norm(targetFirst);
+  const ts = norm(targetSecond);
+  const inf = norm(inputFirst);
+  const ins = norm(inputSecond);
+
+  if (!inf && !ins) return false;
+
+  // 1. Exact match in standard or reversed order
+  if ((inf === tf && ins === ts) || (inf === ts && ins === tf)) return true;
+
+  // 2. Full combined name match
+  const targetFull = `${tf} ${ts}`.trim();
+  const inputFull = `${inf} ${ins}`.trim();
+  if (targetFull === inputFull && targetFull.length > 0) return true;
+
+  // 3. Word-token set match
+  const targetWords = targetFull.split(' ').filter(Boolean);
+  const inputWords = inputFull.split(' ').filter(Boolean);
+
+  if (inputWords.length > 0 && inputWords.every(w => targetWords.includes(w))) return true;
+  if (targetWords.length > 0 && targetWords.every(w => inputWords.includes(w))) return true;
+
+  // 4. Overlap match (at least 2 matching words)
+  const commonWords = inputWords.filter(w => targetWords.includes(w));
+  if (commonWords.length >= 2) return true;
+
+  // 5. If target has only 1 name and either input matches it
+  if (targetWords.length === 1 && inputWords.includes(targetWords[0])) return true;
+
+  return false;
+}
+
+function extractDeviceId(req: express.Request): string | null {
+  const cookies = req.headers.cookie || '';
+  const match = cookies.match(/(?:^|; )device_id=([^;]*)/);
+  const fromCookie = match ? decodeURIComponent(match[1]) : null;
+  const fromBody = req.body?.deviceId ? String(req.body.deviceId).trim() : null;
+  const fromQuery = req.query?.deviceId ? String(req.query.deviceId).trim() : null;
+  const fromHeader = req.headers['x-device-id'] ? String(req.headers['x-device-id']).trim() : null;
+
+  const candidate = fromBody || fromQuery || fromHeader || fromCookie || null;
+  if (candidate && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate)) {
+    return candidate;
+  }
+  return null;
+}
+
 app.post("/api/document/verify", async (req, res) => {
-    const { token } = req.body;
-    const orderId = verifyAccessToken(token);
-    if (!orderId) return res.status(400).json({ error: "Invalid or expired document link." });
-    
-    // Authoritative check: order must exist and be paid
-    const { data: order, error: orderErr } = await supabaseAdmin
-      .from('Orders')
-      .select('id, status, paper_id')
-      .eq('id', orderId)
-      .maybeSingle();
+    try {
+      const { token } = req.body;
+      const orderId = verifyAccessToken(token);
+      if (!orderId) return res.status(400).json({ error: "Invalid or expired document link." });
+      
+      // Authoritative check: order must exist and be paid
+      const { data: order, error: orderErr } = await supabaseAdmin
+        .from('Orders')
+        .select('id, status, paper_id, purchased_pages, page_quantity, customer_id, customers(first_name, second_name)')
+        .eq('id', orderId)
+        .maybeSingle();
 
-    if (orderErr || !order || order.status !== 'paid') {
-      return res.status(403).json({ error: "Access denied. Payment is awaiting verification or has not been confirmed." });
-    }
+      if (orderErr || !order || order.status !== 'paid') {
+        return res.status(403).json({ error: "Access denied. Payment is awaiting verification or has not been confirmed." });
+      }
 
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/(?:^|; )device_id=([^;]*)/);
-    const deviceId = match ? match[1] : null;
-    
-    const { data: dls } = await supabaseAdmin.from('downloads')
-      .select('id')
-      .eq('order_id', orderId)
-      .order('downloaded_at', { ascending: true });
-    
-    const devices = dls || [];
-    
-    if (deviceId && devices.some(d => d.id === deviceId)) {
-        console.log(`[ACCESS LOG] Successful access to order ${orderId} by device ${deviceId}`);
-        return res.json({ success: true });
-    }
-    
-    let limit = 3;
-    const { data: reqs, error: reqErr } = await supabaseAdmin.from('device_requests').select('status').eq('order_id', orderId);
-    if (!reqErr && reqs) {
-        limit += reqs.filter(r => r.status === 'approved').length;
-    }
+      // Resolve customer record if join was null
+      let cust = Array.isArray(order.customers) ? order.customers[0] : order.customers;
+      if (!cust && order.customer_id) {
+        const { data: directCust } = await supabaseAdmin
+          .from('customers')
+          .select('first_name, second_name')
+          .eq('id', order.customer_id)
+          .maybeSingle();
+        if (directCust) cust = directCust;
+      }
 
-    if (devices.length < limit) {
-        return res.json({ requireNames: true });
-    } else {
-        return res.json({ error: `Device limit reached. This document has already been registered on ${limit} devices.` });
+      // Fetch authoritative paper details
+      const { data: paper } = await supabaseAdmin
+        .from('Papers')
+        .select('id, paper_title, unit_code, total_pages, file_path')
+        .eq('id', order.paper_id)
+        .maybeSingle();
+
+      let totalPages = paper?.total_pages ? Number(paper.total_pages) : 0;
+      if ((!totalPages || totalPages <= 0) && paper?.file_path) {
+        const countRes = await getAuthoritativePdfPageCount(paper.file_path);
+        if (countRes.pageCount && countRes.pageCount > 0) {
+          totalPages = countRes.pageCount;
+          supabaseAdmin.from('Papers').update({ total_pages: totalPages }).eq('id', paper.id).then();
+        }
+      }
+
+      const deviceId = extractDeviceId(req);
+      
+      const { data: dls } = await supabaseAdmin.from('downloads')
+        .select('id')
+        .eq('order_id', orderId)
+        .order('downloaded_at', { ascending: true });
+      
+      const devices = dls || [];
+      
+      if (deviceId && devices.some(d => d.id === deviceId)) {
+          console.log(`[ACCESS LOG] Successful verified access to order ${orderId} by device ${deviceId}`);
+          res.setHeader('Set-Cookie', `device_id=${encodeURIComponent(deviceId)}; Path=/; Max-Age=315360000; SameSite=Lax${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+          return res.json({ 
+            success: true,
+            deviceId,
+            paper: {
+              paper_title: paper?.paper_title || "Examination Document",
+              unit_code: paper?.unit_code || "EXAM",
+              total_pages: totalPages > 0 ? totalPages : 1
+            },
+            order: {
+              id: order.id,
+              purchased_pages: order.purchased_pages || null,
+              page_quantity: order.page_quantity || null,
+              customer_name: `${cust?.first_name || ''} ${cust?.second_name || ''}`.trim() || 'Student'
+            }
+          });
+      }
+      
+      let limit = 3;
+      const { data: reqs, error: reqErr } = await supabaseAdmin.from('device_requests').select('status').eq('order_id', orderId);
+      if (!reqErr && reqs) {
+          limit += reqs.filter(r => r.status === 'approved').length;
+      }
+
+      if (devices.length < limit) {
+          return res.json({ 
+            requireNames: true, 
+            currentDevices: devices.length, 
+            deviceLimit: limit 
+          });
+      } else {
+          return res.json({ error: `Device limit reached. This document has already been registered on ${limit} devices.` });
+      }
+    } catch (err: any) {
+      console.error("Error in /api/document/verify:", err);
+      return res.status(500).json({ error: "Verification system error. Please retry." });
     }
 });
 
 app.post("/api/document/register-device", async (req, res) => {
-    const { token, firstName, secondName } = req.body;
-    const orderId = verifyAccessToken(token);
-    if (!orderId) return res.status(400).json({ error: "Invalid link." });
-    
-    const { data: order } = await supabaseAdmin.from('Orders')
-      .select('*, customers(first_name, second_name)')
-      .eq('id', orderId)
-      .maybeSingle();
+    try {
+      const { token, firstName, secondName } = req.body;
+      const orderId = verifyAccessToken(token);
+      if (!orderId) return res.status(400).json({ error: "Invalid document link." });
       
-    if (!order || order.status !== 'paid') return res.status(400).json({ error: "Order not active." });
-    
-    const cust = Array.isArray(order.customers) ? order.customers[0] : order.customers;
-    if (!cust) return res.status(400).json({ error: "Customer data missing." });
-    
-    const targetFirst = (cust.first_name || '').trim().toLowerCase();
-    const targetSecond = (cust.second_name || '').trim().toLowerCase();
-    const inputFirst = (firstName || '').trim().toLowerCase();
-    const inputSecond = (secondName || '').trim().toLowerCase();
-    
-    if (targetFirst !== inputFirst || targetSecond !== inputSecond) {
-        console.warn(`[ACCESS LOG] Failed device registration for order ${orderId}. Name mismatch.`);
-        return res.status(400).json({ error: "These details do not match the information used for this purchase." });
-    }
-
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/(?:^|; )device_id=([^;]*)/);
-    let deviceId = match ? match[1] : crypto.randomUUID();
-
-    // 1. Fetch existing registered devices for this order using REAL orderId
-    const { data: existingDls } = await supabaseAdmin.from('downloads')
-      .select('id, order_id')
-      .eq('order_id', orderId)
-      .order('downloaded_at', { ascending: true });
+      const { data: order } = await supabaseAdmin.from('Orders')
+        .select('*, customers(first_name, second_name)')
+        .eq('id', orderId)
+        .maybeSingle();
+        
+      if (!order || order.status !== 'paid') return res.status(400).json({ error: "Order is awaiting confirmation." });
       
-    const devices = existingDls || [];
-    
-    // 2. Check if THIS device is already registered
-    const isAlreadyRegistered = devices.some(d => d.id === deviceId);
-    if (isAlreadyRegistered) {
-        // ALLOW - Already registered
-        res.setHeader('Set-Cookie', `device_id=${deviceId}; HttpOnly; Path=/; Max-Age=315360000; SameSite=Lax${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
-        return res.json({ success: true });
-    }
-    
-    // 3. New device - check limit
-    let limit = 3;
-    const { data: reqs, error: reqErr } = await supabaseAdmin.from('device_requests').select('status').eq('order_id', orderId);
-    if (!reqErr && reqs) {
-        limit += reqs.filter(r => r.status === 'approved').length;
-    }
+      // Fetch customer directly if joined object is empty
+      let cust = Array.isArray(order.customers) ? order.customers[0] : order.customers;
+      if (!cust && order.customer_id) {
+        const { data: directCust } = await supabaseAdmin
+          .from('customers')
+          .select('first_name, second_name')
+          .eq('id', order.customer_id)
+          .maybeSingle();
+        if (directCust) cust = directCust;
+      }
 
-    if (devices.length >= limit) {
-        return res.status(400).json({ error: `Device limit reached. This document has already been registered on ${limit} devices.` });
-    }
-    
-    // 4. Register new device using the REAL orderId
-    const { error: insertErr } = await supabaseAdmin.from('downloads').insert({
-        id: deviceId,
-        order_id: orderId,
-        paper_id: order.paper_id,
-        downloaded_at: new Date().toISOString()
-    });
-    
-    if (insertErr) {
-        console.error("Device registration insert error:", insertErr);
-        return res.status(500).json({ error: "Registration failed." });
-    }
-    
-    // Concurrency check
-    const { data: checkDls } = await supabaseAdmin.from('downloads')
-      .select('id')
-      .eq('order_id', orderId)
-      .order('downloaded_at', { ascending: true });
+      const isMatch = areNamesMatching(cust?.first_name, cust?.second_name, firstName, secondName);
       
-    if (checkDls && checkDls.length > 3) {
-        const allowedIds = checkDls.slice(0, 3).map(d => d.id);
-        if (!allowedIds.includes(deviceId)) {
-             await supabaseAdmin.from('downloads').delete().eq('id', deviceId).eq('order_id', orderId);
-             return res.status(400).json({ error: "Device limit reached. This document has already been registered on 3 devices." });
+      if (!isMatch) {
+          console.warn(`[ACCESS LOG] Failed device registration for order ${orderId}. Name mismatch. Expected "${cust?.first_name} ${cust?.second_name}", got "${firstName} ${secondName}".`);
+          return res.status(400).json({ error: "These names do not match the details used during purchase. Please enter the first and second names used at checkout." });
+      }
+
+      let deviceId = extractDeviceId(req) || crypto.randomUUID();
+
+      // Fetch authoritative paper details
+      const { data: paper } = await supabaseAdmin
+        .from('Papers')
+        .select('id, paper_title, unit_code, total_pages, file_path')
+        .eq('id', order.paper_id)
+        .maybeSingle();
+
+      let totalPages = paper?.total_pages ? Number(paper.total_pages) : 0;
+      if ((!totalPages || totalPages <= 0) && paper?.file_path) {
+        const countRes = await getAuthoritativePdfPageCount(paper.file_path);
+        if (countRes.pageCount && countRes.pageCount > 0) {
+          totalPages = countRes.pageCount;
+          supabaseAdmin.from('Papers').update({ total_pages: totalPages }).eq('id', paper.id).then();
         }
+      }
+
+      const paperInfo = {
+        paper_title: paper?.paper_title || "Examination Document",
+        unit_code: paper?.unit_code || "EXAM",
+        total_pages: totalPages > 0 ? totalPages : 1
+      };
+
+      const orderInfo = {
+        id: order.id,
+        purchased_pages: order.purchased_pages || null,
+        page_quantity: order.page_quantity || null,
+        customer_name: `${cust?.first_name || ''} ${cust?.second_name || ''}`.trim() || 'Student'
+      };
+
+      // 1. Fetch existing registered devices for this order using REAL orderId
+      const { data: existingDls } = await supabaseAdmin.from('downloads')
+        .select('id, order_id')
+        .eq('order_id', orderId)
+        .order('downloaded_at', { ascending: true });
+        
+      const devices = existingDls || [];
+      
+      // 2. Check if THIS device is already registered
+      const isAlreadyRegistered = devices.some(d => d.id === deviceId);
+      if (isAlreadyRegistered) {
+          res.setHeader('Set-Cookie', `device_id=${encodeURIComponent(deviceId)}; Path=/; Max-Age=315360000; SameSite=Lax${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+          return res.json({ 
+            success: true, 
+            deviceId,
+            paper: paperInfo,
+            order: orderInfo
+          });
+      }
+      
+      // 3. New device - check limit
+      let limit = 3;
+      const { data: reqs, error: reqErr } = await supabaseAdmin.from('device_requests').select('status').eq('order_id', orderId);
+      if (!reqErr && reqs) {
+          limit += reqs.filter(r => r.status === 'approved').length;
+      }
+
+      if (devices.length >= limit) {
+          return res.status(400).json({ error: `Device limit reached. This document has already been registered on ${limit} devices.` });
+      }
+      
+      // 4. Register new device using the REAL orderId
+      const { error: insertErr } = await supabaseAdmin.from('downloads').insert({
+          id: deviceId,
+          order_id: orderId,
+          paper_id: order.paper_id,
+          downloaded_at: new Date().toISOString()
+      });
+      
+      if (insertErr) {
+          console.error("Device registration insert error:", insertErr);
+          return res.status(500).json({ error: "Device registration failed. Please retry." });
+      }
+      
+      console.log(`[ACCESS LOG] Order ${orderId} successfully registered to device ${deviceId}`);
+      
+      res.setHeader('Set-Cookie', `device_id=${encodeURIComponent(deviceId)}; Path=/; Max-Age=315360000; SameSite=Lax${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+      return res.json({ 
+        success: true, 
+        deviceId,
+        paper: paperInfo,
+        order: orderInfo
+      });
+    } catch (err: any) {
+      console.error("Error in /api/document/register-device:", err);
+      return res.status(500).json({ error: "Device registration error. Please retry." });
     }
-    
-    console.log(`[ACCESS LOG] Order ${orderId} successfully registered to device ${deviceId}`);
-    
-    res.setHeader('Set-Cookie', `device_id=${deviceId}; HttpOnly; Path=/; Max-Age=315360000; SameSite=Lax${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
-    return res.json({ success: true });
+});
+
+// Single-page PDF streaming endpoint for secure 1-page-at-a-time viewing (restricts scrolling to future pages)
+app.get("/api/document/page/:token/:pageNum", async (req, res) => {
+    try {
+      const { token, pageNum } = req.params;
+      const requestedPage = parseInt(pageNum, 10);
+      if (isNaN(requestedPage) || requestedPage < 1) {
+          return res.status(400).send("Invalid page number");
+      }
+
+      const orderId = verifyAccessToken(token);
+      if (!orderId) return res.status(403).send("Invalid token");
+
+      const deviceId = extractDeviceId(req);
+      if (!deviceId) {
+          console.warn(`[ACCESS LOG] Single-page stream rejected for ${orderId}: No device id`);
+          return res.status(403).send("Device unauthorized. Please open the document through the secure link.");
+      }
+
+      const { data: dls } = await supabaseAdmin.from('downloads')
+        .select('id')
+        .eq('order_id', orderId);
+        
+      const devices = dls || [];
+      const isRegistered = devices.some(d => d.id === deviceId);
+      
+      if (!isRegistered) {
+          console.warn(`[ACCESS LOG] Single-page stream rejected for ${orderId}: Device not registered`);
+          return res.status(403).send("This document is registered to another device.");
+      }
+
+      const { data: order } = await supabaseAdmin.from('Orders').select('paper_id, status, purchased_pages').eq('id', orderId).maybeSingle();
+      if (!order || order.status !== 'paid') return res.status(403).send("Access denied. Order is not active.");
+
+      if (order.purchased_pages && order.purchased_pages.length > 0) {
+          if (!order.purchased_pages.includes(requestedPage)) {
+              return res.status(403).send("This page was not included in your purchased pages.");
+          }
+      }
+
+      const { data: paper } = await supabaseAdmin.from('Papers').select('file_path, unit_code, paper_title').eq('id', order.paper_id).maybeSingle();
+      if (!paper || !paper.file_path) return res.status(404).send("Document file not found");
+
+      const { data: fileData, error: downloadErr } = await supabaseAdmin.storage.from("Papers").download(paper.file_path);
+      if (downloadErr || !fileData) {
+          console.error("Storage download error for page serve:", downloadErr);
+          return res.status(500).send("Storage error");
+      }
+
+      const arrayBuffer = await fileData.arrayBuffer();
+      const pdfBuffer = Buffer.from(arrayBuffer);
+
+      const sourceDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
+      const totalDocPages = sourceDoc.getPageCount();
+
+      if (requestedPage > totalDocPages) {
+          return res.status(404).send(`Page ${requestedPage} does not exist in this document.`);
+      }
+
+      const singlePageDoc = await PDFDocument.create();
+      const [copiedPage] = await singlePageDoc.copyPages(sourceDoc, [requestedPage - 1]);
+      singlePageDoc.addPage(copiedPage);
+
+      const singlePageBytes = await singlePageDoc.save();
+      const singlePageBuffer = Buffer.from(singlePageBytes);
+
+      const safeUnitCode = (paper.unit_code || 'document').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const safeFilename = `${safeUnitCode}_page_${requestedPage}.pdf`;
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+      res.setHeader('Content-Length', singlePageBuffer.length);
+      res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      return res.end(singlePageBuffer);
+    } catch (err: any) {
+      console.error("Error serving single page:", err);
+      return res.status(500).send("Error generating document page");
+    }
 });
 
 app.get("/api/document/stream/:token", async (req, res) => {
@@ -3858,12 +4043,10 @@ app.get("/api/document/stream/:token", async (req, res) => {
     const orderId = verifyAccessToken(token);
     if (!orderId) return res.status(403).send("Invalid token");
     
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/(?:^|; )device_id=([^;]*)/);
-    const deviceId = match ? match[1] : null;
+    const deviceId = extractDeviceId(req);
     
     if (!deviceId) {
-        console.warn(`[ACCESS LOG] Stream rejected for ${orderId}: No device cookie`);
+        console.warn(`[ACCESS LOG] Stream rejected for ${orderId}: No device id`);
         return res.status(403).send("Device unauthorized. Please open the document through the secure link.");
     }
     
@@ -3927,7 +4110,6 @@ app.get("/api/document/stream/:token", async (req, res) => {
     }
 
     if (!downloadPath) return res.status(500).send("File not found");
-
 
     const { data: fileData, error: downloadErr } = await supabaseAdmin.storage.from("Papers").download(downloadPath);
     if (downloadErr || !fileData) {
@@ -4439,4 +4621,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== "test") {
+  startServer();
+}
